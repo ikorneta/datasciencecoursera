@@ -1,0 +1,173 @@
+---
+title: "Human Activity Recognition: Barbell Lifts"
+output: html_document
+---
+author: Iga Korneta
+
+date: Saturday, August 16, 2014
+
+
+**Synopsis:** The following writeup was created for the Coursera Practical Machine Learning course, edition Aug. 4, 2014. It describes a machine learning model purporting to predict the type of human activity (either correct or one of four possible types of incorrect barbell lifting) from recorded Human Activity Recognition (HAR) data.
+
+**Raw data:** I downloaded the training/validation and testing data from the course website: [training/validation](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv); [testing](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv). Data reference: [Velloso et al., Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises) (full reference in link).
+
+```{r load, echo=TRUE, eval=FALSE}
+# code has eval=FALSE
+download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', 'pml-training.csv')
+download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv', 'pml-training.csv')
+```
+
+**Exploratory data analysis:** The training/validation data file contained 19622 observations of 160 variables. However, many of the variables contained in fact mostly (>70%) NAs or blank strings (treated as NAs). Some variables described sample-identifying information such as timestamps, which would also be useless for modelling. After removing these variables, I ended up with 52 numeric variables as input for modelling + the target variable "classe" as the output.
+
+```{r explore, echo=TRUE, results='hide', message=FALSE}
+# for the curious, I follow a data-preparation template outlined here: http://onepager.togaware.com/
+# code has results='hide'
+library (caret)
+library (ggplot2)
+library (gridExtra)
+
+pml.training <- read.csv('./pml-training.csv', na.strings=c("NA", ""))
+pml.testing <- read.csv('./pml-testing.csv', na.strings=c("NA", ""))
+
+names(pml.training)
+str(pml.training)
+summary(pml.training)
+
+vars <- names(pml.training)
+#these are 'identifying variables'
+id <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window") 
+ignore <- id 
+
+#these are variables with  >70% obs missing 
+mvc <- sapply(pml.training[vars], function(x) sum(is.na(x))) 
+mvn <- names(which(mvc >= 0.7*nrow(pml.training)))
+ignore <- union(ignore, mvn)
+
+vars <- setdiff(vars, ignore)
+```
+
+**Model building, part 1:** I split the training/validation set into training and validation. I also standardised the variables while at that.
+
+Note: it's not an typo that I split the training/validation set into 30% **training** and 70% **validation**, even though it should be the other way round. My laptop is incredibly slow, so the other way round, I could really only do a single tree model (accuracy: 37% :-/).
+
+Anyway - I gambled that 30% of the set was still 5889 observations and would be enough to get decent results. As it so happens, the gamble paid off (see below).
+
+```{r split, echo=TRUE, message=FALSE, results='hide'}
+set.seed(4444)
+in.train <- createDataPartition(pml.training$classe, p=0.3, list=FALSE)
+train.set  <- pml.training[in.train, vars]
+val.set <- pml.training[-in.train, vars]
+
+train.preproc.cent.scale <- preProcess(train.set[,-53], method=c("center", "scale"))
+train.set <- cbind(predict(train.preproc.cent.scale, train.set[,-53]), classe=train.set[,53])
+val.set <- cbind(predict(train.preproc.cent.scale, val.set[,-53]), classe=val.set[,53])
+```
+
+**Model building, part 2:** I did a PCA on the training set to find out how the variance was split, and also to facilitate model building. 
+
+```{r pca, echo=TRUE, message=FALSE}
+train.preproc.pca <- preProcess(train.set[,-53], method="pca", thresh=0.8)
+train.set.pca <- cbind(predict(train.preproc.pca, train.set[,-53]), classe=train.set[,53])
+val.set.pca <- cbind(predict(train.preproc.pca, val.set[,-53]), classe=val.set[,53])
+```
+
+I set the threshold to 80% of total variance because, according to the output, PCA needed 13 components to capture 80% of the variance, but as many as 26 components to capture 95%. Again, doing it with 26 components took forever.
+
+This is the plot of the first two components, coloured by the outcome:
+
+```{r pca.plot, echo=FALSE, message=FALSE, fig.align='center', fig.height=4}
+pca.plot2 <- ggplot(train.set.pca, aes(x=PC1, y=PC2, color=classe))
+pca.plot2 <- pca.plot2 + geom_point() + scale_color_discrete(name="Activity class")
+pca.plot2
+```
+
+
+
+**Model building, part 3:** Now came the time for me to choose the type of method to predict with. Initially, I planned to try out all the available methods, but it quickly turned out that the physical limitations of my laptop meant that calculations took forever. In the end, I tried only the following:
+
+
+* single tree ("rpart")
+
+  This predictor turned out to have an out of sample (i.e. checked on the validation set) accuracy of:
+
+  * when done with 80%-variance-threshold PCA (13 components) and trained on a 70%-of-total-samples training set (13733 observations): ~33%;
+
+  * when done with 95%-variance-threshold PCA (26 components) and trained on a 70%-of-total-samples training set (13733 observations): ~37% 
+
+  * when done with 80%-variance-threshold PCA (13 components) and trained on a 30%-of-total-samples training set (13733 observations): ~37% . That's not a typo - the accuracy was higher on the smaller training set. :-)
+
+```{r rpart, echo=TRUE, eval=FALSE}
+set.seed(1112)
+modfit.rpart.pca <- train(classe~., method="rpart", data=train.set.pca)
+predict.rpart.pca <- predict(modfit.rpart.pca, newdata=val.set.pca)
+confusion.matrix.rpart.pca <- confusionMatrix(val.set$classe, predict.rpart.pca)
+confusion.matrix.rpart.pca
+```
+
+
+* random forest ("rf")
+
+I tried to build this predictor, but didn't manage to get a result. I lost my patience after 10 minutes of my laptop trying to churn through the calculations.
+
+
+```{r rf, echo=TRUE, eval=FALSE}
+set.seed(1112)
+modfit.rf.pca <- train(classe~., method="rf", data=train.set.pca, prox=TRUE)
+predict.rf.pca <- predict(modfit.rf.pca, newdata=val.set.pca)
+confusion.matrix.rf.pca <- confusionMatrix(val.set$classe, predict.rf.pca)
+confusion.matrix.rf.pca
+```
+
+
+
+* boosted trees ("gbm")
+
+I trained this predictor on the 80%-variance PCA threshold (13 components) and on a 30%-of-total-samples training set (5889 observations). As seen from the output below, the accuracy on the validation set turned out to be 75.1%, i.e. an out-of-sample error of 25%. At that point, since the original publication [showcased accuracy of 74-86% depending on the class](http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises), I decided that I wasn't really up for redoing the exercise again, and gave up. :-)
+
+
+
+
+```{r gbm, echo=TRUE, eval=FALSE, message=FALSE}
+set.seed(1112)
+modfit.gbm.pca <- train(classe~., method="gbm", data=train.set.pca)
+predict.gbm.pca <- predict(modfit.gbm.pca, newdata=val.set.pca)
+confusion.matrix.gbm.pca <- confusionMatrix(val.set$classe, predict.gbm.pca)
+res["gbm.pca", "Accuracy"] <- confusion.matrix.gbm.pca$overall["Accuracy"]
+confusion.matrix.gbm.pca
+```
+
+```
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 3264  168  198  216   60
+##          B  259 1899  279  103  117
+##          C  387  170 1678   81   79
+##          D  168  105  249 1642   87
+##          E  157  224  172  138 1833
+## 
+## Overall Statistics
+##                                         
+##                Accuracy : 0.751         
+##                  95% CI : (0.744, 0.758)
+##     No Information Rate : 0.308         
+##     P-Value [Acc > NIR] : <2e-16        
+##                                         
+##                   Kappa : 0.684         
+##  Mcnemar's Test P-Value : <2e-16        
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity             0.771    0.740    0.651    0.753    0.842
+## Specificity             0.932    0.932    0.936    0.947    0.940
+## Pos Pred Value          0.836    0.715    0.701    0.729    0.726
+## Neg Pred Value          0.901    0.940    0.921    0.953    0.969
+## Prevalence              0.308    0.187    0.188    0.159    0.158
+## Detection Rate          0.238    0.138    0.122    0.120    0.133
+## Detection Prevalence    0.284    0.193    0.174    0.164    0.184
+## Balanced Accuracy       0.852    0.836    0.794    0.850    0.891
+```
+
+
